@@ -11,13 +11,13 @@ def generate_launch_description():
     # We declare it here, but set a fixed default value for convenience.
     # Define the name of the package containing the SRDF file
 #    (This package name MUST match the directory in the path: irb120_ros2_moveit2)
-    SRDF_PACKAGE_NAME = 'irb120_ros2_moveit2' 
+    SRDF_PACKAGE_NAME = 'dual_arms' 
 
     # 1. Get the install location (share directory) of the SRDF package
     pkg_share_dir = get_package_share_directory(SRDF_PACKAGE_NAME)
 
     # 2. Construct the file path relative to the package share directory
-    srdf_file_path = os.path.join(pkg_share_dir, 'config', 'irb120.srdf')
+    srdf_file_path = os.path.join(pkg_share_dir, 'config', 'dual_arms.srdf')
 
     # Use this new relative path in the DeclareLaunchArgument
     srdf_path_arg = DeclareLaunchArgument(
@@ -45,7 +45,7 @@ def generate_launch_description():
         executable='inverse_kinematics',
         name='abb_inverse_control',
         output='screen',
-        parameters=[]
+        parameters=[{'use_sim_time': True}]
     )
 
     gripper_node = Node(
@@ -60,5 +60,5 @@ def generate_launch_description():
         srdf_path_arg,
         abb_inverse_node,
         semantic_publisher_node,
-        gripper_node
+        # gripper_node
     ])

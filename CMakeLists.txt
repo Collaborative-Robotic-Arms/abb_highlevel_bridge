@@ -27,8 +27,8 @@ install(TARGETS abb_endeffector_control_client
 
 
 # Executable for inverse kinematics (The one causing the linker error)
+# add_executable(inverse_kinematics src/abb_inverse_position.cpp)
 add_executable(inverse_kinematics src/inverse_kinematics.cpp)
-
 # FIX: Ensure all dependent libraries are explicitly listed here.
 # moveit_ros_planning_interface provides the definition for execute().
 ament_target_dependencies(

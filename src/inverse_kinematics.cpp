@@ -7,11 +7,13 @@
 #include <thread>
 #include <vector>
 
+#include <moveit/planning_scene_monitor/planning_scene_monitor.h>
+
 // --- Configuration ---
 // These must match your robot's setup in the SRDF and configuration files
 static const std::string ROBOT_GROUP_NAME = "irb120_arm"; 
 static const std::string END_EFFECTOR_LINK = "tool0";     
-static const std::string POSE_TOPIC_NAME = "/target_pose";
+static const std::string POSE_TOPIC_NAME = "/target_pose_abb";
 // ---------------------
 
 class MoveItPoseController : public rclcpp::Node
@@ -23,6 +25,7 @@ public:
         
         
         RCLCPP_INFO(this->get_logger(), "Subscribed to %s for real-time IK control.", POSE_TOPIC_NAME.c_str());
+        
     }
 
     // Initialize MoveGroupInterface AFTER the node is added to executor
@@ -40,18 +43,20 @@ public:
             // Now shared_from_this() will work because node is managed by shared_ptr
             move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(shared_from_this(), ROBOT_GROUP_NAME);
 
-
+            RCLCPP_INFO(this->get_logger(), "Reference Planning Frame: %s", move_group_->getPlanningFrame().c_str());
+            RCLCPP_INFO(this->get_logger(), "End Effector Link: %s", move_group_->getEndEffectorLink().c_str());
             // Set the end effector link
             move_group_->setEndEffectorLink(END_EFFECTOR_LINK);
 
             // --- Increased Solver Robustness ---
             
             // Set position tolerance to 1 mm (0.001 m)
-            move_group_->setGoalPositionTolerance(0.001); 
+            move_group_->setGoalPositionTolerance(0.01); 
             
             // Set orientation tolerance to ~1 degree (0.017 radians)
             move_group_->setGoalOrientationTolerance(0.017); 
             
+            move_group_->setPoseReferenceFrame("base_link");
             // Set planning time
             move_group_->setPlanningTime(10.0); // seconds
             move_group_->setNumPlanningAttempts(10); // Increase attempts
@@ -87,22 +92,48 @@ public:
             RCLCPP_ERROR(this->get_logger(), "MoveGroup is not initialized. Cannot move.");
             return false;
         }
-
+        move_group_->setStartStateToCurrentState();
+    
+        // Optional: A tiny sleep to allow the callbacks to process the latest /joint_states
+        // strictly only if you are hitting this error constantly
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         // 1. Define the target pose (Position and Orientation)
         geometry_msgs::msg::Pose target_pose;
         
-        target_pose.position.x = x;
-        target_pose.position.y = y;
-        target_pose.position.z = z;
-        
-        target_pose.orientation.w = qw;
-        target_pose.orientation.x = qx;
-        target_pose.orientation.y = qy;
-        target_pose.orientation.z = qz;
-
+        target_pose.position.x = x; //x; //y + 0.7; //x;//0.45;//x;
+        target_pose.position.y = y; //x - 0.1; //0.23;//y + 0.874; // Note the negative sign for ABB's coordinate system
+        target_pose.position.z = 0.30; //z; //;1.035;
+        // 0.450, 0.230
+        // target_pose.orientation.w = qw;
+        target_pose.orientation.x = -0.0;
+        // target_pose.orientation.y = 1.0; //qy;
+        target_pose.orientation.z = 0.0;
+        target_pose.orientation.w = 0.0;
+        target_pose.orientation.x = qz;
+        target_pose.orientation.y = qw; // 1.0; // Note the negative sign
+        // target_pose.orientation.z = -0.0;
+        // z: 1.035}, orientation: {w: 0.0, x: 0.70711, y: 0.0, z: 0.7071}}}"
         // 2. Set the target pose
-        move_group_->setPoseTarget(target_pose);
+        // 1. Get the current joints (Where we definitely ARE)
+        // std::vector<double> current_joints = move_group_->getCurrentJointValues();
         
+        // RCLCPP_INFO(this->get_logger(), "Current Joints: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f]", 
+        //             current_joints[0], current_joints[1], current_joints[2], 
+        //             current_joints[3], current_joints[4], current_joints[5]);
+        // // 2. Modify one joint slightly (e.g., Joint 1 + 5 degrees)
+        // current_joints[1] += 0.28; 
+
+        // // 3. Set target
+        // move_group_->setJointValueTarget(current_joints);
+
+        // 4. Plan & Execute
+        RCLCPP_INFO(this->get_logger(), "Attempting JOINT target...");
+        // moveit::planning_interface::MoveGroupInterface::Plan plan;
+        // auto const ok = move_group_->plan(plan);
+        move_group_->setPoseTarget(target_pose);
+        // // move_group_->move_to_position(
+        //     target_pose.position.x, target_pose.position.y, target_pose.position.z
+        // );
         RCLCPP_INFO(this->get_logger(), "Attempting to move %s to pose: P(%.4f, %.4f, %.4f) | Q(%.2f, %.2f, %.2f, %.2f)", 
                     ROBOT_GROUP_NAME.c_str(), x, y, z, qw, qx, qy, qz);
 
@@ -147,16 +178,46 @@ private:
     /**
      * @brief Callback executed when a new PoseStamped message is received.
      */
+    /**
+     * @brief Callback executed when a new PoseStamped message is received.
+     */
     void pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
         RCLCPP_INFO(this->get_logger(), "--- NEW COMMAND RECEIVED ---");
+
+        // --- ROBUST STATE CHECK START ---
+        moveit::core::RobotStatePtr current_state;
+        bool state_received = false;
+
+        // Try up to 5 times (total 0.25 seconds wait) to get the state
+        for (int i = 0; i < 5; ++i) {
+            current_state = move_group_->getCurrentState();
+            if (current_state) {
+                state_received = true;
+                break;
+            }
+            // Sleep 50ms to allow /joint_states message to arrive
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        if (!state_received) {
+            RCLCPP_WARN(this->get_logger(), "IGNORING COMMAND: Could not fetch Robot State after retries. (Sim Lag?)");
+            return; 
+        }
+        
+        // Double check timestamp (Time 0.0 means empty state)
+        if (current_state->getVariableCount() == 0) { 
+             RCLCPP_WARN(this->get_logger(), "IGNORING COMMAND: Robot state is empty.");
+             return;
+        }
+        // --- ROBUST STATE CHECK END ---
+
         RCLCPP_INFO(this->get_logger(), "Target received in frame: %s", msg->header.frame_id.c_str());
 
-        // Extract position and orientation from the received message
         const auto& p = msg->pose.position;
         const auto& q = msg->pose.orientation;
 
-        // Call the move function with the received pose data
+        // Call the move function
         this->move_to_pose(p.x, p.y, p.z, q.w, q.x, q.y, q.z);
     }
 };
@@ -165,28 +226,22 @@ int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
     
-    // Use a multi-threaded executor for MoveIt nodes
-    auto executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
-    
-    // Create the controller node
+    // 1. Create Node
     auto controller = std::make_shared<MoveItPoseController>(); 
-    
-    // Add the node to the executor
-    executor->add_node(controller);
 
-    // Spin the executor in a separate thread
-    std::thread executor_thread([&]() { executor->spin(); });
-
-    // NOW initialize MoveGroupInterface (after node is in executor)
+    // 2. Initialize Logic (Create MoveGroup + Subscribers)
+    // Doing this BEFORE the executor spins ensures registration is atomic
     controller->initialize();
 
-    RCLCPP_INFO(controller->get_logger(), "Controller is running and waiting for target poses on %s...", POSE_TOPIC_NAME.c_str());
-    RCLCPP_INFO(controller->get_logger(), "Send a geometry_msgs::msg::PoseStamped message to command the robot.");
-    
-    // The main thread waits for the executor thread to finish (which won't happen 
-    // until rclcpp::shutdown() is called, usually via Ctrl+C).
-    executor_thread.join();
-    
+    // 3. Create Executor
+    auto executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
+    executor->add_node(controller);
+
+    RCLCPP_INFO(controller->get_logger(), "Controller is ready. Spinning...");
+
+    // 4. Spin (Blocking - no need for a separate thread if we just want to run)
+    executor->spin();
+
     rclcpp::shutdown();
     return 0;
 }
