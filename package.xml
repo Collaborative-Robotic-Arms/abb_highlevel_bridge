@@ -11,8 +11,11 @@
   <depend>rosidl_default_generators</depend>
   <depend>moveit_ros_planning_interface</depend>
   <depend>moveit_msgs</depend>
-
-  <build_depend>abb_robot_msgs</build_depend> <!-- Needed for ServiceResponses -->
+  <depend>dual_arms_msgs</depend>
+  <depend>rclcpp_action</depend>
+  <depend>control_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <build_depend>abb_robot_msgs</build_depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>abb_robot_msgs</exec_depend>

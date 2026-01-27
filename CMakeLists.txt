@@ -16,12 +16,34 @@ find_package(moveit_ros_planning_interface REQUIRED) # Core MoveIt C++ API
 find_package(geometry_msgs REQUIRED)                 # For Pose and other message types
 find_package(tf2_geometry_msgs REQUIRED)   
 find_package(moveit_core REQUIRED) 
+find_package(dual_arms_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
+
+find_package(control_msgs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
 
 # Executable for end effector control
 add_executable(abb_endeffector_control_client src/endEffector.cpp)
 ament_target_dependencies(abb_endeffector_control_client rclcpp abb_robot_msgs) 
 
 install(TARGETS abb_endeffector_control_client
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Executable for end effector control
+add_executable(abb_task_server src/abb_task_server.cpp)
+ament_target_dependencies(abb_task_server 
+  rclcpp 
+  rclcpp_action 
+  abb_robot_msgs 
+  moveit_ros_planning_interface 
+  moveit_core 
+  dual_arms_msgs
+  control_msgs
+  trajectory_msgs
+) 
+
+install(TARGETS abb_task_server
   DESTINATION lib/${PROJECT_NAME}
 )
 

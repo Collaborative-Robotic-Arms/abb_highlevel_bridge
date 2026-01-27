@@ -85,13 +85,13 @@ public:
     auto response = future.get();
     if (response->result_code == abb_robot_msgs::msg::ServiceResponses::RC_SUCCESS)
     {
-      RCLCPP_INFO(this->get_logger(), "Gripper %s command successful. Message: %s",
-                  open_gripper ? "OPEN" : "CLOSE", response->message.c_str());
+      // RCLCPP_INFO(this->get_logger(), "Gripper %s command successful. Message: %s",
+      //             open_gripper ? "OPEN" : "CLOSE", response->message.c_str());
     }
     else
     {
-      RCLCPP_ERROR(this->get_logger(), "Failed to %s gripper. Result Code: %d, Message: %s",
-                   open_gripper ? "OPEN" : "CLOSE", response->result_code, response->message.c_str());
+      // RCLCPP_ERROR(this->get_logger(), "Failed to %s gripper. Result Code: %d, Message: %s",
+      //              open_gripper ? "OPEN" : "CLOSE", response->result_code, response->message.c_str());
     }
   });
     // RCLCPP_INFO(this->get_logger(), "BBBBBBBBBBBBBBBB");
