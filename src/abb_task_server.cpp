@@ -172,6 +172,17 @@ private:
                 goal_handle->abort(result);
                 return;
             }
+
+            geometry_msgs::msg::Pose postgrasp = goal->target_pose;
+            postgrasp.position.z = postgrasp.position.z + 0.1;
+            
+            if (!move_to_pose(postgrasp)) {
+                result->success = false;
+                result->error_message = "PICK: MoveIt failed to reach postgrasp";
+                RCLCPP_WARN(this->get_logger(), "PICK: MoveIt failed to reach postgrasp");
+                goal_handle->abort(result);
+                return;
+            }
         }
         // --- Logic for PLACE ---
         else if (goal->task_type == "PLACE")
