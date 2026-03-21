@@ -247,10 +247,18 @@ private:
     {
         if (goal_handle->is_canceling()) return false;
 
-        move_group_->setPoseTarget(target);
+        // 1. Wrap the raw Pose in a PoseStamped to strictly enforce the table frame
+        geometry_msgs::msg::PoseStamped stamped_target;
+        stamped_target.header.frame_id = "abb_table";
+        stamped_target.pose = target;
+
+        // 2. Pass the explicitly framed pose to MoveIt
+        move_group_->setPoseTarget(stamped_target);
+        
         moveit::planning_interface::MoveGroupInterface::Plan plan;
         auto error_code = move_group_->plan(plan);
 
+        // CRITICAL: Check if Supervisor canceled us WHILE we were doing the heavy math
         if (goal_handle->is_canceling()) {
             move_group_->clearPoseTargets();
             return false; 
@@ -262,6 +270,7 @@ private:
             return success;
         }
         
+        RCLCPP_ERROR(this->get_logger(), "ABB Planning Failed! Error Code: %d", error_code.val);
         move_group_->clearPoseTargets();
         return false;
     }
