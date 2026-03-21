@@ -15,6 +15,7 @@
 #include "dual_arms_msgs/action/execute_task.hpp"
 #include "abb_robot_msgs/srv/set_rapid_bool.hpp"
 #include "abb_robot_msgs/msg/service_responses.hpp"
+#include "std_srvs/srv/set_bool.hpp"
 
 // Controller Interfaces
 #include "control_msgs/action/follow_joint_trajectory.hpp"
@@ -45,7 +46,18 @@ public:
             std::bind(&AbbTaskServer::handle_accepted, this, _1)
         );
 
-        // 3. Initialize ARM Driver Client (Dynamic for Sim vs Hardware)
+        // 3. Initialize Gripper Service for MTC / Supervisor
+        // Create a separate thread group for the service to prevent deadlocks
+        this->service_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        
+        this->gripper_service_server_ = this->create_service<std_srvs::srv::SetBool>(
+            "abb_controller/set_gripper", 
+            std::bind(&AbbTaskServer::handle_gripper_service, this, _1, _2),
+            rmw_qos_profile_services_default,
+            this->service_cb_group_ // <-- Assign the group here
+        );
+
+        // 4. Initialize ARM Driver Client (Dynamic for Sim vs Hardware)
         std::string arm_controller_name = use_sim_ ? 
             "/irb120_trajectory_controller/follow_joint_trajectory" : 
             "/irb120_controller/follow_joint_trajectory"; // Matches hardware YAML
@@ -54,7 +66,7 @@ public:
             this, arm_controller_name
         );
 
-        // 4. Initialize Gripper Clients
+        // 5. Initialize Gripper Clients
         if (use_sim_) {
             RCLCPP_INFO(this->get_logger(), "Mode: SIMULATION. Connecting to: %s", arm_controller_name.c_str());
             this->sim_gripper_client_ = rclcpp_action::create_client<TrajectoryAction>(
@@ -92,6 +104,8 @@ public:
 
 private:
     rclcpp_action::Server<ExecuteTask>::SharedPtr action_server_;
+    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr gripper_service_server_;
+    rclcpp::CallbackGroup::SharedPtr service_cb_group_;
     rclcpp::Client<abb_robot_msgs::srv::SetRAPIDBool>::SharedPtr real_gripper_client_;
     std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
     rclcpp_action::Client<TrajectoryAction>::SharedPtr sim_gripper_client_;
@@ -130,6 +144,19 @@ private:
         }
 
         return rclcpp_action::CancelResponse::ACCEPT;
+    }
+
+    void handle_gripper_service(
+        const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+        std::shared_ptr<std_srvs::srv::SetBool::Response> response)
+    {
+        RCLCPP_INFO(this->get_logger(), "MTC/Supervisor requested ABB Gripper: %s", request->data ? "OPEN" : "CLOSE");
+        
+        // Route the request through your existing Sim/Real abstraction logic
+        bool success = control_gripper(request->data); 
+        
+        response->success = success;
+        response->message = success ? "Gripper moved successfully" : "Gripper failed to move";
     }
 
     void handle_accepted(const std::shared_ptr<GoalHandleExecuteTask> goal_handle)
