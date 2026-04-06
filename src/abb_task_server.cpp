@@ -387,7 +387,7 @@ private:
         };
 
         trajectory_msgs::msg::JointTrajectoryPoint point;
-        double pos = open ? 0.0120 : 0.005; 
+        double pos = open ? 0.0135 : 0.001; 
         point.positions = {pos, pos};
         point.time_from_start = rclcpp::Duration::from_seconds(2.0);
         goal_msg.trajectory.points.push_back(point);
