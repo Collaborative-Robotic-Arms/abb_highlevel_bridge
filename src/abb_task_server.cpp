@@ -243,7 +243,17 @@ private:
             feedback->current_status = "OPENING_GRIPPER_FOR_TAKE";
             goal_handle->publish_feedback(feedback);
             if (!control_gripper(true)) { HANDLE_FAILURE("INTERMEDIATE_TAKE: Failed to open gripper"); }
-
+            
+            feedback->current_status = "MOVING_TO_HANDOVER_APPROACH";
+            goal_handle->publish_feedback(feedback);
+            
+            geometry_msgs::msg::Pose pregrasp_handover = goal->target_pose;
+            pregrasp_handover.position.z += 0.10; // 10cm Safety Offset
+            
+            if (!move_to_pose(pregrasp_handover, goal_handle)) { 
+                HANDLE_FAILURE("INTERMEDIATE_TAKE: Failed to reach approach pose"); 
+            }
+            
             feedback->current_status = "MOVING_TO_HANDOVER_GRASP";
             goal_handle->publish_feedback(feedback);
             if (!move_to_pose(goal->target_pose, goal_handle)) { HANDLE_FAILURE("INTERMEDIATE_TAKE: Failed to reach pose"); }
@@ -367,7 +377,7 @@ private:
         request->path.task = "T_ROB1";
         request->path.module = "egm";
         request->path.symbol = "gripper_close";
-        request->value = !open; // Typically "close=true", so open=false in RAPID
+        request->value = open; // Typically "close=true", so open=false in RAPID
         
         auto future = real_gripper_client_->async_send_request(request);
         if (future.wait_for(std::chrono::seconds(3)) == std::future_status::ready) {
