@@ -47,20 +47,19 @@ public:
         );
 
         // 3. Initialize Gripper Service for MTC / Supervisor
-        // Create a separate thread group for the service to prevent deadlocks
         this->service_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         
         this->gripper_service_server_ = this->create_service<std_srvs::srv::SetBool>(
             "abb_controller/set_gripper", 
             std::bind(&AbbTaskServer::handle_gripper_service, this, _1, _2),
             rmw_qos_profile_services_default,
-            this->service_cb_group_ // <-- Assign the group here
+            this->service_cb_group_ 
         );
 
-        // 4. Initialize ARM Driver Client (Dynamic for Sim vs Hardware)
+        // 4. Initialize ARM Driver Client 
         std::string arm_controller_name = use_sim_ ? 
             "/irb120_trajectory_controller/follow_joint_trajectory" : 
-            "/irb120_controller/follow_joint_trajectory"; // Matches hardware YAML
+            "/irb120_controller/follow_joint_trajectory"; 
 
         this->arm_driver_client_ = rclcpp_action::create_client<TrajectoryAction>(
             this, arm_controller_name
@@ -91,11 +90,10 @@ public:
             move_group_->setGoalPositionTolerance(0.001); 
             move_group_->setGoalOrientationTolerance(0.017); 
             move_group_->setPlanningTime(10.0);            
-            move_group_->setPoseReferenceFrame("abb_table"); // Set to abb_table as requested
-            move_group_->setMaxVelocityScalingFactor(0.6);
+            move_group_->setPoseReferenceFrame("abb_table"); 
+            move_group_->setMaxVelocityScalingFactor(0.4);
             move_group_->setMaxAccelerationScalingFactor(0.4);
             
-
             RCLCPP_INFO(this->get_logger(), "MoveGroupInterface Ready for ABB.");
         } catch (const std::exception& e) {
             RCLCPP_ERROR(this->get_logger(), "MoveIt init failed: %s", e.what());
@@ -130,11 +128,9 @@ private:
         
         if (move_group_) move_group_->stop();
 
-        // Physical Freeze for ABB
         if (arm_driver_client_) {
             arm_driver_client_->async_cancel_all_goals();
             
-            // Send empty trajectory to force hardware stop
             auto stop_pub = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
                 use_sim_ ? "/irb120_trajectory_controller/joint_trajectory" : "/irb120_controller/joint_trajectory", 10);
             trajectory_msgs::msg::JointTrajectory empty_msg;
@@ -152,11 +148,12 @@ private:
     {
         RCLCPP_INFO(this->get_logger(), "MTC/Supervisor requested ABB Gripper: %s", request->data ? "OPEN" : "CLOSE");
         
-        // Route the request through your existing Sim/Real abstraction logic
         bool success = control_gripper(request->data); 
         
         response->success = success;
         response->message = success ? "Gripper moved successfully" : "Gripper failed to move";
+        // ---> DEBUG ADDED
+        if (!success) RCLCPP_ERROR(this->get_logger(), "Gripper service request failed internally.");
     }
 
     void handle_accepted(const std::shared_ptr<GoalHandleExecuteTask> goal_handle)
@@ -164,7 +161,6 @@ private:
         std::thread{std::bind(&AbbTaskServer::execute, this, _1), goal_handle}.detach();
     }
 
-    // Fixed the macro to safely handle C++ std::string formatting using .c_str()
     #define HANDLE_FAILURE(error_msg) \
         result->success = false; \
         if (goal_handle->is_canceling()) { \
@@ -189,6 +185,9 @@ private:
         if (goal->task_type == "PICK")
         {
             if (!control_gripper(true)) { HANDLE_FAILURE("PICK: Failed to open gripper"); }
+            
+            // ---> DEBUG ADDED
+            RCLCPP_INFO(this->get_logger(), "PICK: Gripper opened successfully. Moving to pre-grasp.");
 
             feedback->current_status = "MOVING_TO_PREGRASP";
             goal_handle->publish_feedback(feedback);
@@ -196,11 +195,17 @@ private:
             pregrasp.position.z = pregrasp.position.z + 0.1;
             if (!move_to_pose(pregrasp, goal_handle)) { HANDLE_FAILURE("PICK: Failed to reach pregrasp"); }
 
+            // ---> DEBUG ADDED
+            RCLCPP_INFO(this->get_logger(), "PICK: Pre-grasp reached. Moving to target grasp pose.");
+
             feedback->current_status = "MOVING_TO_TARGET";
             goal_handle->publish_feedback(feedback);
             if (!move_to_pose(goal->target_pose, goal_handle)) { HANDLE_FAILURE("PICK: Failed to reach pose"); }
 
             if (!control_gripper(false)) { HANDLE_FAILURE("PICK: Failed to grasp object"); }
+            
+            // ---> DEBUG ADDED
+            RCLCPP_INFO(this->get_logger(), "PICK: Gripper closed. Retreating to post-grasp pose.");
 
             geometry_msgs::msg::Pose postgrasp = goal->target_pose;
             postgrasp.position.z = postgrasp.position.z + 0.1;
@@ -284,30 +289,42 @@ private:
     {
         if (goal_handle->is_canceling()) return false;
 
-        // 1. Wrap the raw Pose in a PoseStamped to strictly enforce the table frame
+        // ---> DEBUG ADDED: Log exact pose request to check for coordinate issues
+        RCLCPP_INFO(this->get_logger(), "Planning to Pose Target: Pos [%.3f, %.3f, %.3f], Ori [%.3f, %.3f, %.3f, %.3f]", 
+            target.position.x, target.position.y, target.position.z,
+            target.orientation.x, target.orientation.y, target.orientation.z, target.orientation.w);
+
         geometry_msgs::msg::PoseStamped stamped_target;
         stamped_target.header.frame_id = "abb_table";
         stamped_target.pose = target;
 
-        // 2. Pass the explicitly framed pose to MoveIt
         move_group_->setPoseTarget(stamped_target);
         
         moveit::planning_interface::MoveGroupInterface::Plan plan;
         auto error_code = move_group_->plan(plan);
 
-        // CRITICAL: Check if Supervisor canceled us WHILE we were doing the heavy math
         if (goal_handle->is_canceling()) {
+            // ---> DEBUG ADDED
+            RCLCPP_WARN(this->get_logger(), "Plan was successful, but goal was cancelled by supervisor before execution.");
             move_group_->clearPoseTargets();
             return false; 
         }
 
         if (error_code == moveit::core::MoveItErrorCode::SUCCESS) {
+            // ---> DEBUG ADDED
+            RCLCPP_INFO(this->get_logger(), "MoveIt Planning SUCCESS. Trajectory points: %zu. Sending to driver...", plan.trajectory.joint_trajectory.points.size());
+            
             bool success = execute_trajectory_via_driver(plan.trajectory.joint_trajectory, goal_handle);
+            if (!success) {
+                // ---> DEBUG ADDED
+                RCLCPP_ERROR(this->get_logger(), "MoveIt planned successfully, but execution via hardware/sim driver FAILED.");
+            }
             move_group_->clearPoseTargets();
             return success;
         }
         
-        RCLCPP_ERROR(this->get_logger(), "ABB Planning Failed! Error Code: %d", error_code.val);
+        // ---> DEBUG ADDED: Explicit error logging when MoveIt cannot find an IK/Path solution
+        RCLCPP_ERROR(this->get_logger(), "ABB Planning Failed! MoveIt Error Code: %d (IK failure or out of bounds)", error_code.val);
         move_group_->clearPoseTargets();
         return false;
     }
@@ -317,47 +334,68 @@ private:
         if (goal_handle->is_canceling()) return false;
 
         if (move_group_->getNamedTargets().empty()) {
-             RCLCPP_WARN(this->get_logger(), "No named targets found.");
+             RCLCPP_WARN(this->get_logger(), "No named targets found in SRDF!");
              return false;
         }
         
         move_group_->setNamedTarget(name);
         moveit::planning_interface::MoveGroupInterface::Plan plan;
-
-        if (move_group_->plan(plan) == moveit::core::MoveItErrorCode::SUCCESS) {
+        
+        auto error_code = move_group_->plan(plan);
+        if (error_code == moveit::core::MoveItErrorCode::SUCCESS) {
              if (goal_handle->is_canceling()) return false; 
              return execute_trajectory_via_driver(plan.trajectory.joint_trajectory, goal_handle);
         }
         
+        // ---> DEBUG ADDED
+        RCLCPP_ERROR(this->get_logger(), "Failed to plan to named target '%s'. Error code: %d", name.c_str(), error_code.val);
         return false;
     }
 
-    // THE KEY TO PARALLEL EXECUTION
     bool execute_trajectory_via_driver(const trajectory_msgs::msg::JointTrajectory& trajectory, std::shared_ptr<GoalHandleExecuteTask> server_goal_handle)
     {
-        if (!arm_driver_client_->wait_for_action_server(std::chrono::seconds(2))) return false;
+        if (!arm_driver_client_->wait_for_action_server(std::chrono::seconds(2))) {
+            // ---> DEBUG ADDED
+            RCLCPP_ERROR(this->get_logger(), "Execution Failed: Arm driver action server is not running or unreachable.");
+            return false;
+        }
 
         auto goal_msg = TrajectoryAction::Goal();
         goal_msg.trajectory = trajectory;
 
         auto goal_handle_future = arm_driver_client_->async_send_goal(goal_msg);
-        if (goal_handle_future.wait_for(std::chrono::seconds(1)) != std::future_status::ready) return false;
+        if (goal_handle_future.wait_for(std::chrono::seconds(1)) != std::future_status::ready) {
+            // ---> DEBUG ADDED
+            RCLCPP_ERROR(this->get_logger(), "Execution Failed: Timed out sending goal to arm driver.");
+            return false;
+        }
 
         auto action_goal_handle = goal_handle_future.get();
-        if (!action_goal_handle) return false;
+        if (!action_goal_handle) {
+            // ---> DEBUG ADDED
+            RCLCPP_ERROR(this->get_logger(), "Execution Failed: Goal was rejected by the arm driver (Controller issue).");
+            return false;
+        }
 
         auto result_future = arm_driver_client_->async_get_result(action_goal_handle);
         
-        // Non-blocking monitor for C++ Action Cancel while physically moving
         while (result_future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
             if (server_goal_handle->is_canceling()) {
+                RCLCPP_WARN(this->get_logger(), "Execution aborted mid-trajectory due to Supervisor cancel.");
                 arm_driver_client_->async_cancel_all_goals();
                 return false;
             }
         }
 
         auto result = result_future.get();
-        return (result.code == rclcpp_action::ResultCode::SUCCEEDED);
+        
+        // ---> DEBUG ADDED: Check the exact result code from the FollowJointTrajectory action
+        if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
+            RCLCPP_ERROR(this->get_logger(), "Arm driver execution aborted! Action Server Result Code: %d", static_cast<int>(result.code));
+            return false;
+        }
+
+        return true;
     }
 
     // =========================================================================
@@ -365,30 +403,49 @@ private:
     // =========================================================================
 
     bool control_gripper(bool open) {
+        // ---> DEBUG ADDED
+        RCLCPP_INFO(this->get_logger(), "Executing Gripper Command: %s", open ? "OPEN" : "CLOSE");
         if (use_sim_) return send_sim_gripper_command(open);
         else return send_real_gripper_command(open);
     }
 
     bool send_real_gripper_command(bool open)
     {
-        if (!real_gripper_client_->wait_for_service(std::chrono::seconds(1))) return false;
+        if (!real_gripper_client_->wait_for_service(std::chrono::seconds(2))) {
+            // ---> DEBUG ADDED
+            RCLCPP_ERROR(this->get_logger(), "Real gripper service /rws_client/set_gripper_state timed out.");
+            return false;
+        }
         
         auto request = std::make_shared<abb_robot_msgs::srv::SetRAPIDBool::Request>();
         request->path.task = "T_ROB1";
         request->path.module = "egm";
         request->path.symbol = "gripper_close";
-        request->value = open; // Typically "close=true", so open=false in RAPID
+        request->value = open; 
         
         auto future = real_gripper_client_->async_send_request(request);
         if (future.wait_for(std::chrono::seconds(3)) == std::future_status::ready) {
-            return (future.get()->result_code == abb_robot_msgs::msg::ServiceResponses::RC_SUCCESS);
+            auto res = future.get();
+            // ---> DEBUG ADDED
+            if (res->result_code != abb_robot_msgs::msg::ServiceResponses::RC_SUCCESS) {
+                RCLCPP_ERROR(this->get_logger(), "Real Gripper Rejected Command. Result code: %d", res->result_code);
+                return false;
+            }
+            return true;
         }
+        
+        // ---> DEBUG ADDED
+        RCLCPP_ERROR(this->get_logger(), "Real gripper service call timed out while waiting for response.");
         return false;
     }
 
     bool send_sim_gripper_command(bool open)
     {
-        if (!sim_gripper_client_->wait_for_action_server(std::chrono::seconds(2))) return false;
+        if (!sim_gripper_client_->wait_for_action_server(std::chrono::seconds(2))) {
+            // ---> DEBUG ADDED
+            RCLCPP_ERROR(this->get_logger(), "Simulated gripper action server unreachable!");
+            return false;
+        }
         
         auto goal_msg = TrajectoryAction::Goal();
         goal_msg.trajectory.joint_names = {
@@ -403,13 +460,33 @@ private:
         goal_msg.trajectory.points.push_back(point);
 
         auto goal_handle_future = sim_gripper_client_->async_send_goal(goal_msg);
-        if (goal_handle_future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) return false;
+        if (goal_handle_future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+             // ---> DEBUG ADDED
+             RCLCPP_ERROR(this->get_logger(), "Timeout sending goal to sim gripper.");
+             return false;
+        }
 
         auto goal_handle = goal_handle_future.get();
-        if (!goal_handle) return false;
+        if (!goal_handle) {
+             // ---> DEBUG ADDED
+             RCLCPP_ERROR(this->get_logger(), "Sim Gripper goal rejected!");
+             return false;
+        }
 
         auto result_future = sim_gripper_client_->async_get_result(goal_handle);
-        return (result_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        if (result_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+            auto result = result_future.get();
+            // ---> DEBUG ADDED
+            if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
+                RCLCPP_ERROR(this->get_logger(), "Sim Gripper action failed with code: %d", static_cast<int>(result.code));
+                return false;
+            }
+            return true;
+        }
+        
+        // ---> DEBUG ADDED
+        RCLCPP_ERROR(this->get_logger(), "Sim Gripper action execution timed out.");
+        return false;
     }
 };
 
